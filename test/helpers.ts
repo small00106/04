@@ -58,3 +58,33 @@ export async function teardownHarness(h: TestHarness): Promise<void> {
   await admin.query(`DROP DATABASE IF EXISTS ${h.dbName}`);
   await admin.end();
 }
+
+/**
+ * Create an EMPTY database (no schema) so an upgrade test can first lay down a
+ * legacy schema + dirty data and THEN run the current migration against it.
+ */
+export async function setupEmptyDb(
+  tag: string,
+): Promise<{ pool: pg.Pool; databaseUrl: string; dbName: string }> {
+  const dbName = `meterd_${tag}_${process.pid}_${randomBytes6()}`.replace(
+    /[^a-zA-Z0-9_]/g,
+    '_',
+  );
+  const admin = new pg.Pool({ connectionString: ADMIN_URL, max: 1 });
+  await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+  await admin.query(`CREATE DATABASE ${dbName}`);
+  await admin.end();
+
+  const url = new URL(ADMIN_URL);
+  url.pathname = `/${dbName}`;
+  const databaseUrl = url.toString();
+  const pool = createPool(databaseUrl);
+  pool.on('error', (err) => console.error('idle pool error', err));
+  return { pool, databaseUrl, dbName };
+}
+
+export async function dropDb(dbName: string): Promise<void> {
+  const admin = new pg.Pool({ connectionString: ADMIN_URL, max: 1 });
+  await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+  await admin.end();
+}

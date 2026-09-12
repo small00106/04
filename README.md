@@ -28,7 +28,20 @@
 
 数据库层另有兜底：`usage_agg_cycle` 上对 `(tenant_id, metric, daterange(cycle_start, cycle_end))` 的 **GiST 排他约束** `usage_agg_cycle_no_overlap`，即使绕过 API 直接写库，也无法插入互相重叠的周期行（违反返回 PG `23P01`）。
 
-> 迁移注意：给已存在的库补这条排他约束时，如果历史数据里已经存在重叠周期行，`ALTER TABLE ... ADD CONSTRAINT` 会失败——这说明数据已处于双算状态，需先人工修复重叠行再迁移。
+### 存量脏数据如何升级（Upgrading with overlapping cycles）
+
+带旧 bug 产物（互相重叠的 cycle 行）的库正是唯一需要升级路径的库，因此 **`npm run migrate` 绝不会因存量重叠行而失败、绝不会让服务起不来**。迁移在加排他约束之前会先自愈：
+
+1. 按 `(tenant_id, metric)` 用 gaps-and-islands 找出所有**严格重叠**的连通分量；相邻（首尾相接、不重叠）的周期不动。
+2. 每个重叠分量合并成一行，`total/event_count` **求和**（每个事件原本只落在一行，求和保证总量守恒）。合并后的区间：
+   - 若该分量包含覆盖租户**本地今天**的行——即当前配置锚点切出的现行周期——则归一到现行周期 `[cur_start, cur_end)`，保证升级后新事件仍 upsert 到这一行，而不会撞上人为的并集区间；
+   - 否则（全是历史周期）取并集 `[min(start), max(end))`。
+   - 归一后若与相邻历史行恰好相接/重叠，会进入下一轮继续合并（循环严格减少行数，必然终止），再加约束。
+3. 每一条被并入的原始行都写入审计表 `usage_agg_cycle_repair_log`（旧区间、旧 total、合并目标）。
+
+**为什么选合并而不是"标记作废"或"要求运维先清脚本"**：标记作废会让该周期的计费直接丢量；要求人工预处理会让最需要升级的库卡死、服务无法启动。合并保证总量守恒且服务立即可用。但合并对"事件原本属于哪个周期"是一次性近似，**升级后必须依据 `usage_agg_cycle_repair_log` 对照 `usage_events` 原始事件做对账/精确重切**，审计表就是为此留的凭证。
+
+> 时区/锚点冻结只阻止产生新的不一致；存量数据的处理收敛在迁移这一步，而不是推迟到运行时。
 
 ## 数据模型（`src/db/schema.sql`）
 
@@ -39,7 +52,8 @@
 | `idempotency_keys` | 24h 幂等 claim（含请求体指纹），过期回收 |
 | `usage_agg_hourly` | 按 `(租户, 指标, 本地小时)` 的增量聚合 |
 | `usage_agg_daily` | 按 `(租户, 指标, 本地日期)` |
-| `usage_agg_cycle` | 按 `(租户, 指标, 周期起始日)`，`[cycle_start, cycle_end)` |
+| `usage_agg_cycle` | 按 `(租户, 指标, 周期起始日)`，`[cycle_start, cycle_end)`；带区间排他约束禁止重叠 |
+| `usage_agg_cycle_repair_log` | 升级时合并掉的旧周期行审计凭证，供对账/重切 |
 
 计费周期：起算日限制在 1..28（保证每月都有该日，无需短月裁剪）。anchor=1 即自然月。
 
@@ -120,5 +134,6 @@ npm test
   - 有用量后改时区被 `409` 拒绝，查询仍以原时区标注；无用量租户可自由改，`displayName` 始终可改；
   - 直接写库制造重叠周期行被排他约束以 `23P01` 拒绝，相邻（不重叠）周期行允许；
   - 三个窗口配置真实生效：超 10s 拒绝、超 1s 未来偏移拒绝、同键过 2s 后可复用（证明 SQL 已参数化）。
+- `test/upgrade.test.ts`：从**无排他约束的旧 schema**（`test/fixtures/legacy-schema.sql`）建库，灌入旧 bug 产物——覆盖今天的重叠周期对（anchor 20 行与 anchor 1 行）、纯历史重叠对、以及一个只有相邻干净周期的租户——再跑当前 migrate：断言迁移不崩、约束建上、覆盖今天的分量归一到现行 anchor=1 周期且 total 求和守恒、纯历史分量取并集、相邻行原样保留、每条被并行走入审计表、服务能在升级后的库上启动并继续 upsert 幸存行、且迁移可重复执行。
 
 测试库连接：`METERD_TEST_ADMIN_URL`（默认 `postgres://postgres@127.0.0.1:5432/postgres`，需建库权限），每次运行创建并删除独立数据库。
