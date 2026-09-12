@@ -12,11 +12,15 @@ import { cycleRange, localParts } from '../src/time/buckets.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const LEGACY_SCHEMA = join(here, 'fixtures', 'legacy-schema.sql');
 
-const fmt = (d: Date) => d.toISOString().slice(0, 10);
+// Date arithmetic on test-defined UTC date CONSTANTS only. Never feed this a
+// DATE column read from Postgres — node-pg parses those as local-midnight JS
+// Dates and toISOString() would shift a day under a non-UTC TZ. DB dates are
+// compared via SQL to_char(...) strings instead.
+const isoFromUtcDate = (d: Date) => d.toISOString().slice(0, 10);
 const datePlus = (iso: string, days: number) => {
   const d = new Date(`${iso}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
-  return fmt(d);
+  return isoFromUtcDate(d);
 };
 
 let pool: Pool;
@@ -92,35 +96,41 @@ test('upgrade: a legacy DB with overlapping cycle rows self-heals and stays boot
 
   // 6) dirty pair collapsed to the tenant's CURRENT anchor=1 cycle, total conserved
   const dirty = await rows(
-    `SELECT cycle_start, cycle_end, total, event_count
+    `SELECT to_char(cycle_start,'YYYY-MM-DD') AS cycle_start,
+            to_char(cycle_end,'YYYY-MM-DD')   AS cycle_end,
+            total, event_count
        FROM usage_agg_cycle WHERE tenant_id='u_dirty' AND metric='m' ORDER BY cycle_start`,
   );
   assert.equal(dirty.length, 1, 'overlapping pair must become a single row');
-  assert.equal(dirty[0].cycle_start.toISOString().slice(0, 10), cur1.start);
-  assert.equal(dirty[0].cycle_end.toISOString().slice(0, 10), cur1.end);
+  assert.equal(dirty[0].cycle_start, cur1.start);
+  assert.equal(dirty[0].cycle_end, cur1.end);
   assert.equal(Number(dirty[0].total), 200);
   assert.equal(Number(dirty[0].event_count), 2);
 
   // 7) audit trail records both superseded originals, pointing at the survivor
   const log = await rows(
-    `SELECT old_cycle_start, old_total, merged_into_cycle_start
+    `SELECT to_char(old_cycle_start,'YYYY-MM-DD') AS old_cycle_start,
+            old_total,
+            to_char(merged_into_cycle_start,'YYYY-MM-DD') AS merged_into_cycle_start
        FROM usage_agg_cycle_repair_log
       WHERE tenant_id='u_dirty' ORDER BY old_cycle_start`,
   );
   assert.equal(log.length, 2);
   for (const l of log) {
     assert.equal(Number(l.old_total), 100);
-    assert.equal(l.merged_into_cycle_start.toISOString().slice(0, 10), cur1.start);
+    assert.equal(l.merged_into_cycle_start, cur1.start);
   }
 
   // 8) historical overlap collapsed to union range, sum conserved
   const past = await rows(
-    `SELECT cycle_start, cycle_end, total FROM usage_agg_cycle
+    `SELECT to_char(cycle_start,'YYYY-MM-DD') AS cycle_start,
+            to_char(cycle_end,'YYYY-MM-DD')   AS cycle_end, total
+       FROM usage_agg_cycle
       WHERE tenant_id='u_past' ORDER BY cycle_start`,
   );
   assert.equal(past.length, 1);
-  assert.equal(past[0].cycle_start.toISOString().slice(0, 10), pStart);
-  assert.equal(past[0].cycle_end.toISOString().slice(0, 10), datePlus(pStart, 40));
+  assert.equal(past[0].cycle_start, pStart);
+  assert.equal(past[0].cycle_end, datePlus(pStart, 40));
   assert.equal(Number(past[0].total), 35);
 
   // 9) adjacent clean rows left exactly as they were
