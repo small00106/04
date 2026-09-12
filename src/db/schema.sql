@@ -2,6 +2,10 @@
 -- All usage values are stored as BIGINT (integer minor units, e.g. cents / bytes / millis).
 -- No floating point anywhere.
 
+-- btree_gist lets us put TEXT columns in a GiST exclusion constraint, used to
+-- guarantee billing-cycle rows never overlap for the same (tenant, metric).
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
 CREATE TABLE IF NOT EXISTS tenants (
     id              TEXT PRIMARY KEY,
     display_name    TEXT NOT NULL,
@@ -81,5 +85,30 @@ CREATE TABLE IF NOT EXISTS usage_agg_cycle (
     event_count BIGINT NOT NULL DEFAULT 0,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, metric, cycle_start),
-    CHECK (cycle_end > cycle_start)
+    CHECK (cycle_end > cycle_start),
+    -- Defense in depth: two cycle rows for the same (tenant, metric) must never
+    -- cover overlapping dates, or a client summing cycle rows double counts.
+    -- Anchor changes are blocked at the API while usage exists, but this index
+    -- makes an overlap physically impossible even against a direct SQL write.
+    CONSTRAINT usage_agg_cycle_no_overlap EXCLUDE USING gist (
+        tenant_id WITH =,
+        metric WITH =,
+        daterange(cycle_start, cycle_end, '[)') WITH &&
+    )
 );
+
+-- Upgrade path for databases created before the exclusion constraint existed.
+-- No-op on fresh installs (the inline constraint above is already there).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'usage_agg_cycle_no_overlap'
+    ) THEN
+        ALTER TABLE usage_agg_cycle
+            ADD CONSTRAINT usage_agg_cycle_no_overlap EXCLUDE USING gist (
+                tenant_id WITH =,
+                metric WITH =,
+                daterange(cycle_start, cycle_end, '[)') WITH &&
+            );
+    END IF;
+END $$;

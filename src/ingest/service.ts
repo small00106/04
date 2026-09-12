@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import { config, type Windows } from '../config.js';
 import { ErrorCode, MeterError } from '../errors.js';
 import {
   cycleRange,
@@ -41,7 +42,14 @@ function fingerprint(input: IngestEventInput, occurredAt: Date): string {
 }
 
 export class IngestService {
-  constructor(private pool: Pool) {}
+  private readonly windows: Windows;
+
+  constructor(
+    private pool: Pool,
+    windows: Windows = config,
+  ) {
+    this.windows = windows;
+  }
 
   private validate(input: Partial<IngestEventInput>, now: Date): Date {
     if (typeof input.tenantId !== 'string' || !input.tenantId.trim()) {
@@ -108,21 +116,21 @@ export class IngestService {
     }
     const occurredAt = new Date(ms);
     const ageMs = now.getTime() - ms;
-    if (ageMs > 72 * 60 * 60 * 1000) {
+    if (ageMs > this.windows.maxLatenessMs) {
       throw new MeterError(
         ErrorCode.EVENT_TOO_OLD,
-        'events older than 72 hours cannot be backfilled',
+        'events older than the configured lateness window cannot be backfilled',
         422,
         {
           field: 'occurredAt',
           occurredAt: occurredAt.toISOString(),
           oldestAllowed: new Date(
-            now.getTime() - 72 * 60 * 60 * 1000,
+            now.getTime() - this.windows.maxLatenessMs,
           ).toISOString(),
         },
       );
     }
-    if (ms > now.getTime() + 5 * 60 * 1000) {
+    if (ms > now.getTime() + this.windows.futureGraceMs) {
       throw new MeterError(
         ErrorCode.EVENT_IN_FUTURE,
         'occurredAt is too far in the future',
@@ -178,13 +186,18 @@ export class IngestService {
         );
         const eventId = String(eventRes.rows[0]!.id);
 
-        // 2) Reclaim an expired claim (>24h) so the key can be reused.
+        // 2) Reclaim an expired claim (older than the idempotency window) so
+        //    the key can be reused. The cutoff is parameterized from config —
+        //    no hard-coded SQL interval.
+        const claimCutoff = new Date(
+          now.getTime() - this.windows.idempotencyWindowMs,
+        );
         await client.query(
           `DELETE FROM idempotency_keys
             WHERE tenant_id = $1
               AND idempotency_key = $2
-              AND created_at < now() - interval '24 hours'`,
-          [input.tenantId, input.idempotencyKey],
+              AND created_at < $3::timestamptz`,
+          [input.tenantId, input.idempotencyKey, claimCutoff.toISOString()],
         );
 
         // 3) Claim the key. PK makes concurrent claims safe; a conflict means

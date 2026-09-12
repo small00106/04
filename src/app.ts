@@ -1,13 +1,15 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
+import type { Windows } from './config.js';
 import { MeterError } from './errors.js';
 import { registerRoutes } from './http/routes.js';
 
 export interface BuildAppOptions {
   pool: Pool;
+  windows?: Windows;
 }
 
-export async function buildApp({ pool }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({ pool, windows }: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
 
   // Every MeterError maps to a stable { code, message, details } envelope.
@@ -36,7 +38,7 @@ export async function buildApp({ pool }: BuildAppOptions): Promise<FastifyInstan
     });
   });
 
-  await registerRoutes(app, { pool });
+  await registerRoutes(app, { pool, windows });
 
   return app;
 }

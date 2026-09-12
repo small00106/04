@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
+import type { Windows } from '../config.js';
 import { ErrorCode, MeterError } from '../errors.js';
 import { IngestService } from '../ingest/service.js';
 import { QueryService, type Granularity } from '../query/service.js';
@@ -7,6 +8,7 @@ import { TenantService } from '../tenants/service.js';
 
 export interface RouteDeps {
   pool: Pool;
+  windows?: Windows;
 }
 
 const GRANULARITIES = new Set(['hourly', 'daily', 'cycle']);
@@ -15,7 +17,7 @@ export async function registerRoutes(
   app: FastifyInstance,
   deps: RouteDeps,
 ): Promise<void> {
-  const ingest = new IngestService(deps.pool);
+  const ingest = new IngestService(deps.pool, deps.windows);
   const query = new QueryService(deps.pool);
   const tenants = new TenantService(deps.pool);
 
