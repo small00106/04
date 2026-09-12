@@ -1,0 +1,27 @@
+{
+  "name": "meterd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-tenant usage metering service: idempotent event ingestion with incremental hourly/daily/billing-cycle rollups",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql')\"",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "migrate": "tsx src/migrate.ts",
+    "test": "tsx --test test/buckets.test.ts test/integration.test.ts"
+  },
+  "dependencies": {
+    "fastify": "^4.29.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
